@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 pragma solidity ^0.8.6;
 
-interface CurvePoolLike {
-    function get_dy(int128 i, int128 j, uint256 dx) external view returns (uint256);
-    function exchange(int128 i, int128 j, uint256 dx, uint256 min_dy) external;
-}
-
 interface IERC20 {
     function totalSupply() external view returns (uint256);
     function balanceOf(address account) external view returns (uint256);
@@ -33,6 +28,26 @@ interface GUNITokenLike is IERC20 {
     function getMintAmounts(uint256 amount0Max, uint256 amount1Max) external view returns (uint256 amount0, uint256 amount1, uint256 mintAmount);
     function token0() external view returns (address);
     function token1() external view returns (address);
+}
+
+interface GUNIRouterLike {
+    function rebalanceAndAddLiquidity(
+        address pool,
+        uint256 amount0In,
+        uint256 amount1In,
+        bool zeroForOne,
+        uint256 swapAmount,
+        uint160 swapThreshold,
+        uint256 amount0Min,
+        uint256 amount1Min,
+        address receiver
+    )
+    external
+    returns (
+        uint256 amount0,
+        uint256 amount1,
+        uint256 mintAmount
+    );
 }
 
 interface IERC3156FlashBorrower {
@@ -102,18 +117,18 @@ contract GuniLev is IERC3156FlashBorrower {
     IERC20 public immutable dai;
     IERC20 public immutable otherToken;
     IERC3156FlashLender public immutable lender;
-    CurvePoolLike public immutable curvePool;
+    GUNIRouterLike public immutable router;
 
-    constructor(GemJoinLike _join, DaiJoinLike _daiJoin, IERC20 _otherToken, IERC3156FlashLender _lender, CurvePoolLike _curvePool) {
-        vat = _join.vat();
+    constructor(GemJoinLike _join, DaiJoinLike _daiJoin, IERC20 _otherToken, IERC3156FlashLender _lender, GUNIRouterLike _router) {
+        vat = VatLike(_join.vat());
         ilk = _join.ilk();
         join = _join;
         daiJoin = _daiJoin;
         guni = GUNITokenLike(_join.gem());
-        dai = _daiJoin.dai();
+        dai = IERC20(_daiJoin.dai());
         otherToken = _otherToken;
         lender = _lender;
-        curvePool = _curvePool;
+        router = _router;
     }
 
     // --- math ---
@@ -124,11 +139,11 @@ contract GuniLev is IERC3156FlashBorrower {
 
     function wind(
         uint256 principal,
-        uint256 leverage,
+        uint256 leverageBPS,
         uint256 slippage
     ) external {
-        bytes memory data = abi.encode(Action.WIND, msg.sender, principal, leverage, slippage);
-        initFlashLoan(data, principal*leverage);
+        bytes memory data = abi.encode(Action.WIND, msg.sender, principal, leverageBPS, slippage);
+        initFlashLoan(data, principal*leverageBPS/10000);
     }
 
     function initFlashLoan(bytes memory data, uint256 amount) internal {
@@ -164,11 +179,18 @@ contract GuniLev is IERC3156FlashBorrower {
     }
 
     function _wind(address usr, uint256 totalOwed, uint256 principal, uint256 leverage, uint256 slippage) internal {
-        // TODO: Convert some of the DAI to USDC
-
-        // Mint G-UNI
-        (,, uint256 mintAmount) = guni.getMintAmounts(IERC20(guni.token0()).balanceOf(address(this)), IERC20(guni.token1()).balanceOf(address(this)));
-        (,, uint256 guniBalance) = guni.mint(mintAmount, address(this));
+        // Rebalance and mint G-UNI
+        (,, uint256 guniBalance) = router.rebalanceAndAddLiquidity(
+            address(guni),
+            IERC20(guni.token0()).balanceOf(address(this)),
+            IERC20(guni.token1()).balanceOf(address(this)),
+            guni.token0() == address(dai),
+            swapAmount,
+            swapThreshold,
+            amount0Min,
+            amount1Min,
+            address(this)
+        );
 
         // Open / Re-enforce vault
         guni.approve(address(join), guniBalance);
