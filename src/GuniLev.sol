@@ -14,6 +14,12 @@ interface IERC20 {
     ) external returns (bool);
 }
 
+interface UniPoolLike {
+    function slot0() external view returns (uint160, int24, uint16, uint16, uint16, uint8, bool);
+    function swap(address, bool, int256, uint160, bytes calldata) external;
+    function positions(bytes32) external view returns (uint128, uint256, uint256, uint128, uint128);
+}
+
 interface GUNITokenLike is IERC20 {
     function mint(uint256 mintAmount, address receiver) external returns (
         uint256 amount0,
@@ -28,26 +34,21 @@ interface GUNITokenLike is IERC20 {
     function getMintAmounts(uint256 amount0Max, uint256 amount1Max) external view returns (uint256 amount0, uint256 amount1, uint256 mintAmount);
     function token0() external view returns (address);
     function token1() external view returns (address);
+    function pool() external view returns (address);
 }
 
-interface GUNIRouterLike {
-    function rebalanceAndAddLiquidity(
+interface CurveSwapLike {
+    function exchange(int128 i, int128 j, uint256 dx, uint256 min_dy) external;
+    function coins(uint256) external view returns (address);
+}
+
+interface GUNIResolverLike {
+    function getRebalanceParams(
         address pool,
         uint256 amount0In,
         uint256 amount1In,
-        bool zeroForOne,
-        uint256 swapAmount,
-        uint160 swapThreshold,
-        uint256 amount0Min,
-        uint256 amount1Min,
-        address receiver
-    )
-    external
-    returns (
-        uint256 amount0,
-        uint256 amount1,
-        uint256 mintAmount
-    );
+        uint256 price18Decimals
+    ) external view returns (bool zeroForOne, uint256 swapAmount);
 }
 
 interface IERC3156FlashBorrower {
@@ -100,9 +101,14 @@ interface VatLike {
         uint256 line, // [rad]
         uint256 dust  // [rad]
     );
+    function urns(bytes32, address) external view returns (uint256, uint256);
     function hope(address usr) external;
     function frob (bytes32 i, address u, address v, address w, int dink, int dart) external;
     function dai(address) external view returns (uint256);
+}
+
+interface SpotLike {
+    function ilks(bytes32) external view returns (address pip, uint256 mat);
 }
 
 contract GuniLev is IERC3156FlashBorrower {
@@ -113,22 +119,40 @@ contract GuniLev is IERC3156FlashBorrower {
     bytes32 public immutable ilk;
     GemJoinLike public immutable join;
     DaiJoinLike public immutable daiJoin;
+    SpotLike public immutable spotter;
     GUNITokenLike public immutable guni;
     IERC20 public immutable dai;
     IERC20 public immutable otherToken;
     IERC3156FlashLender public immutable lender;
-    GUNIRouterLike public immutable router;
+    CurveSwapLike public immutable curve;
+    GUNIResolverLike public immutable resolver;
+    int128 public immutable curveIndexDai;
+    int128 public immutable curveIndexOtherToken;
 
-    constructor(GemJoinLike _join, DaiJoinLike _daiJoin, IERC20 _otherToken, IERC3156FlashLender _lender, GUNIRouterLike _router) {
+    constructor(
+        GemJoinLike _join,
+        DaiJoinLike _daiJoin,
+        SpotLike _spotter,
+        IERC20 _otherToken,
+        IERC3156FlashLender _lender,
+        CurveSwapLike _curve,
+        GUNIResolverLike _resolver, 
+        int128 _curveIndexDai,
+        int128 _curveIndexOtherToken
+    ) {
         vat = VatLike(_join.vat());
         ilk = _join.ilk();
         join = _join;
         daiJoin = _daiJoin;
+        spotter = _spotter;
         guni = GUNITokenLike(_join.gem());
         dai = IERC20(_daiJoin.dai());
         otherToken = _otherToken;
         lender = _lender;
-        router = _router;
+        curve = _curve;
+        resolver = _resolver;
+        curveIndexDai = _curveIndexDai;
+        curveIndexOtherToken = _curveIndexOtherToken;
     }
 
     // --- math ---
@@ -139,11 +163,11 @@ contract GuniLev is IERC3156FlashBorrower {
 
     function wind(
         uint256 principal,
-        uint256 leverageBPS,
-        uint256 slippage
+        uint256 minExchangeBPS
     ) external {
-        bytes memory data = abi.encode(Action.WIND, msg.sender, principal, leverageBPS, slippage);
-        initFlashLoan(data, principal*leverageBPS/10000);
+        bytes memory data = abi.encode(Action.WIND, msg.sender, principal, minExchangeBPS);
+        (,uint256 mat) = spotter.ilks(ilk);
+        initFlashLoan(data, principal*RAY/(mat - RAY));
     }
 
     function initFlashLoan(bytes memory data, uint256 amount) internal {
@@ -169,34 +193,38 @@ contract GuniLev is IERC3156FlashBorrower {
             initiator == address(this),
             "FlashBorrower: Untrusted loan initiator"
         );
-        (Action action, address usr, uint256 principal, uint256 leverage, uint256 slippage) = abi.decode(data, (Action, address, uint256, uint256, uint256));
+        (Action action, address usr, uint256 principal, uint256 minExchangeBPS) = abi.decode(data, (Action, address, uint256, uint256));
         if (action == Action.WIND) {
-            _wind(usr, amount + fee, principal, leverage, slippage);
+            _wind(usr, amount + fee, principal, minExchangeBPS);
         } else if (action == Action.UNWIND) {
             
         }
         return keccak256("ERC3156FlashBorrower.onFlashLoan");
     }
 
-    function _wind(address usr, uint256 totalOwed, uint256 principal, uint256 leverage, uint256 slippage) internal {
-        // Rebalance and mint G-UNI
-        (,, uint256 guniBalance) = router.rebalanceAndAddLiquidity(
+    function _wind(address usr, uint256 totalOwed, uint256 principal, uint256 minExchangeBPS) internal {
+        // Calculate how much DAI we should be swapping for otherToken
+        (uint256 sqrtPriceX96,,,,,,) = UniPoolLike(guni.pool()).slot0();
+        (, uint256 swapAmount) = resolver.getRebalanceParams(
             address(guni),
             IERC20(guni.token0()).balanceOf(address(this)),
             IERC20(guni.token1()).balanceOf(address(this)),
-            guni.token0() == address(dai),
-            swapAmount,
-            swapThreshold,
-            amount0Min,
-            amount1Min,
-            address(this)
+            (((sqrtPriceX96*sqrtPriceX96) >> 96) * 1e18) >> 96
         );
+
+        // Swap DAI for otherToken on Curve
+        curve.exchange(curveIndexDai, curveIndexOtherToken, swapAmount, swapAmount * minExchangeBPS / 10000);
+
+        // Mint G-UNI
+        (,, uint256 mintAmount) = guni.getMintAmounts(IERC20(guni.token0()).balanceOf(address(this)), IERC20(guni.token1()).balanceOf(address(this)));
+        (,, uint256 guniBalance) = guni.mint(mintAmount, address(this));
 
         // Open / Re-enforce vault
         guni.approve(address(join), guniBalance);
         join.join(address(usr), guniBalance);
-        (,uint256 rate,,,) = vat.ilks(ilk);
-        uint256 dart = divup(guniBalance * RAY, rate);      // TODO: This should draw max dai against the vault, not just the new collateral
+        (,uint256 rate, uint256 spot,,) = vat.ilks(ilk);
+        (uint256 ink, uint256 art) = vat.urns(ilk, usr);
+        uint256 dart = divup((guniBalance + ink) * spot, rate) - art;
         vat.frob(ilk, address(usr), address(usr), address(this), int256(guniBalance), int256(dart));
         daiJoin.exit(address(this), vat.dai(address(this)) / RAY);
 

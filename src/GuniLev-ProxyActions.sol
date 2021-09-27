@@ -20,7 +20,7 @@ interface VatLike {
 }
 
 interface GuniLevLike {
-    function wind(uint256, uint256, uint256) external;
+    function wind(uint256, uint256) external;
 }
 
 // Extra safety when managing your vault
@@ -37,10 +37,10 @@ contract GuniLevProxyActions {
         lev = _lev;
     }
 
-    function wind(uint256 principal, uint256 leverageBPS, uint256 slippage) external {
+    function wind(uint256 principal, uint256 minExchangeBPS) external {
         vat.hope(address(lev));
         dai.approve(address(lev), principal);
-        lev.wind(principal, leverageBPS, slippage);
+        lev.wind(principal, minExchangeBPS);
         vat.nope(address(lev));     // Deny access after we are done just to be extra safe in case of contract exploit
     }
 
