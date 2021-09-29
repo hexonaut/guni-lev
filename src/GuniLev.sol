@@ -149,6 +149,7 @@ contract GuniLev is IERC3156FlashBorrower {
     GUNIResolverLike public immutable resolver;
     int128 public immutable curveIndexDai;
     int128 public immutable curveIndexOtherToken;
+    uint256 public immutable otherTokenTo18Conversion;
 
     constructor(
         GemJoinLike _join,
@@ -176,13 +177,13 @@ contract GuniLev is IERC3156FlashBorrower {
         resolver = _resolver;
         curveIndexDai = _curveIndexDai;
         curveIndexOtherToken = _curveIndexOtherToken;
+        otherTokenTo18Conversion = 10 ** _otherToken.decimals();
+        
+        VatLike(_join.vat()).hope(address(_daiJoin));
     }
 
     // --- math ---
     uint256 constant RAY = 10 ** 27;
-    function divup(uint256 x, uint256 y) internal pure returns (uint256 z) {
-        z = (x + (y - 1)) / y;
-    }
 
     function wind(
         uint256 principal,
@@ -234,20 +235,24 @@ contract GuniLev is IERC3156FlashBorrower {
                 address(guni),
                 IERC20(guni.token0()).balanceOf(address(this)),
                 IERC20(guni.token1()).balanceOf(address(this)),
-                (((sqrtPriceX96*sqrtPriceX96) >> 96) * 1e18) >> 96
+                ((((sqrtPriceX96*sqrtPriceX96) >> 96) * 1e18) >> 96) * 1e18 / otherTokenTo18Conversion
             );
         }
 
         // Swap DAI for otherToken on Curve
         dai.approve(address(curve), swapAmount);
-        curve.exchange(curveIndexDai, curveIndexOtherToken, swapAmount, swapAmount * (10 ** otherToken.decimals()) / 1e18 * minExchangeBPS / 10000);
+        curve.exchange(curveIndexDai, curveIndexOtherToken, swapAmount, swapAmount * otherTokenTo18Conversion / 1e18 * minExchangeBPS / 10000);
 
         // Mint G-UNI
         uint256 guniBalance;
         {
             uint256 bal0 = IERC20(guni.token0()).balanceOf(address(this));
             uint256 bal1 = IERC20(guni.token1()).balanceOf(address(this));
+            dai.approve(address(router), bal0);
+            otherToken.approve(address(router), bal1);
             (,, guniBalance) = router.addLiquidity(address(guni), bal0, bal1, bal0 * 99 / 100, bal1 * 99 / 100, address(this));      // Slippage on this is not terribly important - use 1%
+            dai.approve(address(router), 0);
+            otherToken.approve(address(router), 0);
         }
 
         // Open / Re-enforce vault
@@ -256,7 +261,7 @@ contract GuniLev is IERC3156FlashBorrower {
             join.join(address(usr), guniBalance);
             (,uint256 rate, uint256 spot,,) = vat.ilks(ilk);
             (uint256 ink, uint256 art) = vat.urns(ilk, usr);
-            uint256 dart = divup((guniBalance + ink) * spot, rate) - art;
+            uint256 dart = (guniBalance + ink) * spot / rate - art;
             vat.frob(ilk, address(usr), address(usr), address(this), int256(guniBalance), int256(dart));
             daiJoin.exit(address(this), vat.dai(address(this)) / RAY);
         }

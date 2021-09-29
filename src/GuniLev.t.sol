@@ -11,6 +11,15 @@ interface Hevm {
     function load(address, bytes32 slot) external returns (bytes32);
 }
 
+interface PipLike {
+    function kiss(address) external;
+    function read() external view returns (uint256);
+}
+
+interface AuthLike {
+    function wards(address) external returns (uint256);
+}
+
 contract GuniLevTest is DSTest {
 
     Hevm public hevm;
@@ -18,6 +27,7 @@ contract GuniLevTest is DSTest {
     bytes32 public ilk;
     GemJoinLike public join;
     DaiJoinLike public daiJoin;
+    PipLike public pip;
     SpotLike public spotter;
     GUNITokenLike public guni;
     IERC20 public dai;
@@ -34,6 +44,7 @@ contract GuniLevTest is DSTest {
         vat = VatLike(0x35D1b3F3D7966A1DFe207aa4514C12a259A0492B);
         join = GemJoinLike(0xbFD445A97e7459b0eBb34cfbd3245750Dba4d7a4);
         daiJoin = DaiJoinLike(0x9759A6Ac90977b93B58547b4A71c78317f391A28);
+        pip = PipLike(0x7F6d78CC0040c87943a0e0c140De3F77a273bd58);
         spotter = SpotLike(0x65C79fcB50Ca1594B025960e539eD7A9a6D434A3);
         guni = GUNITokenLike(join.gem());
         ilk = join.ilk();
@@ -46,10 +57,64 @@ contract GuniLevTest is DSTest {
 
         lev = new GuniLev(join, daiJoin, spotter, otherToken, lender, curve, router, resolver, 0, 1);
 
+        // Give read access to Oracle
+        giveAuthAccess(address(pip), address(this));
+        pip.kiss(address(this));
+
         // Set the user up with some money
         giveTokens(address(dai), 50_000 * 1e18);
         vat.hope(address(lev));
         dai.approve(address(lev), type(uint256).max);
+    }
+
+    function assertEqApprox(uint256 _a, uint256 _b, uint256 _tolerance) internal {
+        uint256 a = _a;
+        uint256 b = _b;
+        if (a < b) {
+            uint256 tmp = a;
+            a = b;
+            b = tmp;
+        }
+        if (a - b > _tolerance * a / 1e4) {
+            emit log_bytes32("Error: Wrong `uint' value");
+            emit log_named_uint("  Expected", _b);
+            emit log_named_uint("    Actual", _a);
+            fail();
+        }
+    }
+
+    function giveAuthAccess (address _base, address target) internal {
+        AuthLike base = AuthLike(_base);
+
+        // Edge case - ward is already set
+        if (base.wards(target) == 1) return;
+
+        for (int i = 0; i < 100; i++) {
+            // Scan the storage for the ward storage slot
+            bytes32 prevValue = hevm.load(
+                address(base),
+                keccak256(abi.encode(target, uint256(i)))
+            );
+            hevm.store(
+                address(base),
+                keccak256(abi.encode(target, uint256(i))),
+                bytes32(uint256(1))
+            );
+            if (base.wards(target) == 1) {
+                // Found it
+                return;
+            } else {
+                // Keep going after restoring the original value
+                hevm.store(
+                    address(base),
+                    keccak256(abi.encode(target, uint256(i))),
+                    prevValue
+                );
+            }
+        }
+
+        // We have failed if we reach here
+        assertTrue(false);
     }
 
     function giveTokens(address token, uint256 amount) internal {
@@ -85,7 +150,28 @@ contract GuniLevTest is DSTest {
     }
 
     function test_open_position() public {
+        uint256 principal = dai.balanceOf(address(this));
+        uint256 leveragedAmount = principal * 20;
+
         lev.wind(dai.balanceOf(address(this)), 10000);      // Swap 1:1
+
+        // Should never be leftovers
+        assertEq(dai.balanceOf(address(lev)), 0);
+        assertEq(otherToken.balanceOf(address(lev)), 0);
+        assertEq(guni.balanceOf(address(lev)), 0);
+
+        // Should never be leftover approvals
+        assertEq(dai.allowance(address(lev), address(lender)), 0);
+        assertEq(dai.allowance(address(lev), address(curve)), 0);
+        assertEq(dai.allowance(address(lev), address(router)), 0);
+        assertEq(otherToken.allowance(address(lev), address(router)), 0);
+        assertEq(guni.allowance(address(lev), address(join)), 0);
+
+        // Should have a position open worth roughly 20x the original investment
+         (,uint256 rate,,,) = vat.ilks(ilk);
+        (uint256 ink, uint256 art) = vat.urns(ilk, address(this));
+        assertEqApprox(ink * pip.read() / 1e18, leveragedAmount, 100);
+        assertEqApprox(art * rate / 1e27, leveragedAmount * 19 / 20, 100);
     }
 
 }
