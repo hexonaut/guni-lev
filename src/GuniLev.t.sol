@@ -24,6 +24,7 @@ contract GuniLevTest is DSTest {
     IERC20 public otherToken;
     IERC3156FlashLender public lender;
     CurveSwapLike public curve;
+    GUNIRouterLike public router;
     GUNIResolverLike public resolver;
     GuniLev public lev;
 
@@ -40,9 +41,10 @@ contract GuniLevTest is DSTest {
         otherToken = IERC20(0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48);    // USDC
         lender = IERC3156FlashLender(0x1EB4CF3A948E7D72A198fe073cCb8C7a948cD853);
         curve = CurveSwapLike(0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7);      // 3-pool
+        router = GUNIRouterLike(0x14E6D67F824C3a7b4329d3228807f8654294e4bd);
         resolver = GUNIResolverLike(0x0317650Af6f184344D7368AC8bB0bEbA5EDB214a);
 
-        lev = new GuniLev(join, daiJoin, spotter, otherToken, lender, curve, resolver, 0, 1);
+        lev = new GuniLev(join, daiJoin, spotter, otherToken, lender, curve, router, resolver, 0, 1);
 
         // Set the user up with some money
         giveTokens(address(dai), 50_000 * 1e18);
@@ -83,7 +85,7 @@ contract GuniLevTest is DSTest {
     }
 
     function test_open_position() public {
-        lev.wind(dai.balanceOf(address(this)), 10 * 1e4, 0);
+        lev.wind(dai.balanceOf(address(this)), 10000);      // Swap 1:1
     }
 
 }

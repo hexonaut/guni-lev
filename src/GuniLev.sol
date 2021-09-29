@@ -2,6 +2,9 @@
 pragma solidity ^0.8.6;
 
 interface IERC20 {
+    function name() external view returns (string memory);
+    function symbol() external view returns (string memory);
+    function decimals() external view returns (uint8);
     function totalSupply() external view returns (uint256);
     function balanceOf(address account) external view returns (uint256);
     function transfer(address recipient, uint256 amount) external returns (bool);
@@ -40,6 +43,23 @@ interface GUNITokenLike is IERC20 {
 interface CurveSwapLike {
     function exchange(int128 i, int128 j, uint256 dx, uint256 min_dy) external;
     function coins(uint256) external view returns (address);
+}
+
+interface GUNIRouterLike {
+    function addLiquidity(
+        address _pool,
+        uint256 _amount0Max,
+        uint256 _amount1Max,
+        uint256 _amount0Min,
+        uint256 _amount1Min,
+        address _receiver
+    )
+    external
+    returns (
+        uint256 amount0,
+        uint256 amount1,
+        uint256 mintAmount
+    );
 }
 
 interface GUNIResolverLike {
@@ -125,6 +145,7 @@ contract GuniLev is IERC3156FlashBorrower {
     IERC20 public immutable otherToken;
     IERC3156FlashLender public immutable lender;
     CurveSwapLike public immutable curve;
+    GUNIRouterLike public immutable router;
     GUNIResolverLike public immutable resolver;
     int128 public immutable curveIndexDai;
     int128 public immutable curveIndexOtherToken;
@@ -136,6 +157,7 @@ contract GuniLev is IERC3156FlashBorrower {
         IERC20 _otherToken,
         IERC3156FlashLender _lender,
         CurveSwapLike _curve,
+        GUNIRouterLike _router,
         GUNIResolverLike _resolver, 
         int128 _curveIndexDai,
         int128 _curveIndexOtherToken
@@ -150,6 +172,7 @@ contract GuniLev is IERC3156FlashBorrower {
         otherToken = _otherToken;
         lender = _lender;
         curve = _curve;
+        router = _router;
         resolver = _resolver;
         curveIndexDai = _curveIndexDai;
         curveIndexOtherToken = _curveIndexOtherToken;
@@ -165,7 +188,7 @@ contract GuniLev is IERC3156FlashBorrower {
         uint256 principal,
         uint256 minExchangeBPS
     ) external {
-        bytes memory data = abi.encode(Action.WIND, msg.sender, principal, minExchangeBPS);
+        bytes memory data = abi.encode(Action.WIND, msg.sender, minExchangeBPS);
         (,uint256 mat) = spotter.ilks(ilk);
         initFlashLoan(data, principal*RAY/(mat - RAY));
     }
@@ -180,7 +203,7 @@ contract GuniLev is IERC3156FlashBorrower {
 
     function onFlashLoan(
         address initiator,
-        address _token,
+        address,
         uint256 amount,
         uint256 fee,
         bytes calldata data
@@ -193,40 +216,50 @@ contract GuniLev is IERC3156FlashBorrower {
             initiator == address(this),
             "FlashBorrower: Untrusted loan initiator"
         );
-        (Action action, address usr, uint256 principal, uint256 minExchangeBPS) = abi.decode(data, (Action, address, uint256, uint256));
+        (Action action, address usr, uint256 minExchangeBPS) = abi.decode(data, (Action, address, uint256));
         if (action == Action.WIND) {
-            _wind(usr, amount + fee, principal, minExchangeBPS);
+            _wind(usr, amount + fee, minExchangeBPS);
         } else if (action == Action.UNWIND) {
             
         }
         return keccak256("ERC3156FlashBorrower.onFlashLoan");
     }
 
-    function _wind(address usr, uint256 totalOwed, uint256 principal, uint256 minExchangeBPS) internal {
+    function _wind(address usr, uint256 totalOwed, uint256 minExchangeBPS) internal {
         // Calculate how much DAI we should be swapping for otherToken
-        (uint256 sqrtPriceX96,,,,,,) = UniPoolLike(guni.pool()).slot0();
-        (, uint256 swapAmount) = resolver.getRebalanceParams(
-            address(guni),
-            IERC20(guni.token0()).balanceOf(address(this)),
-            IERC20(guni.token1()).balanceOf(address(this)),
-            (((sqrtPriceX96*sqrtPriceX96) >> 96) * 1e18) >> 96
-        );
+        uint256 swapAmount;
+        {
+            (uint256 sqrtPriceX96,,,,,,) = UniPoolLike(guni.pool()).slot0();
+            (, swapAmount) = resolver.getRebalanceParams(
+                address(guni),
+                IERC20(guni.token0()).balanceOf(address(this)),
+                IERC20(guni.token1()).balanceOf(address(this)),
+                (((sqrtPriceX96*sqrtPriceX96) >> 96) * 1e18) >> 96
+            );
+        }
 
         // Swap DAI for otherToken on Curve
-        curve.exchange(curveIndexDai, curveIndexOtherToken, swapAmount, swapAmount * minExchangeBPS / 10000);
+        dai.approve(address(curve), swapAmount);
+        curve.exchange(curveIndexDai, curveIndexOtherToken, swapAmount, swapAmount * (10 ** otherToken.decimals()) / 1e18 * minExchangeBPS / 10000);
 
         // Mint G-UNI
-        (,, uint256 mintAmount) = guni.getMintAmounts(IERC20(guni.token0()).balanceOf(address(this)), IERC20(guni.token1()).balanceOf(address(this)));
-        (,, uint256 guniBalance) = guni.mint(mintAmount, address(this));
+        uint256 guniBalance;
+        {
+            uint256 bal0 = IERC20(guni.token0()).balanceOf(address(this));
+            uint256 bal1 = IERC20(guni.token1()).balanceOf(address(this));
+            (,, guniBalance) = router.addLiquidity(address(guni), bal0, bal1, bal0 * 99 / 100, bal1 * 99 / 100, address(this));      // Slippage on this is not terribly important - use 1%
+        }
 
         // Open / Re-enforce vault
-        guni.approve(address(join), guniBalance);
-        join.join(address(usr), guniBalance);
-        (,uint256 rate, uint256 spot,,) = vat.ilks(ilk);
-        (uint256 ink, uint256 art) = vat.urns(ilk, usr);
-        uint256 dart = divup((guniBalance + ink) * spot, rate) - art;
-        vat.frob(ilk, address(usr), address(usr), address(this), int256(guniBalance), int256(dart));
-        daiJoin.exit(address(this), vat.dai(address(this)) / RAY);
+        {
+            guni.approve(address(join), guniBalance);
+            join.join(address(usr), guniBalance);
+            (,uint256 rate, uint256 spot,,) = vat.ilks(ilk);
+            (uint256 ink, uint256 art) = vat.urns(ilk, usr);
+            uint256 dart = divup((guniBalance + ink) * spot, rate) - art;
+            vat.frob(ilk, address(usr), address(usr), address(this), int256(guniBalance), int256(dart));
+            daiJoin.exit(address(this), vat.dai(address(this)) / RAY);
+        }
 
         uint256 daiBalance = dai.balanceOf(address(this));
         if (daiBalance > totalOwed) {
