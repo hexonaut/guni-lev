@@ -42,6 +42,7 @@ interface GUNITokenLike is IERC20 {
 
 interface CurveSwapLike {
     function exchange(int128 i, int128 j, uint256 dx, uint256 min_dy) external;
+    function get_dy(int128 i, int128 j, uint256 dx) external view returns (uint256);
     function coins(uint256) external view returns (address);
 }
 
@@ -133,6 +134,8 @@ interface SpotLike {
 
 contract GuniLev is IERC3156FlashBorrower {
 
+    uint256 constant RAY = 10 ** 27;
+
     enum Action {WIND, UNWIND}
 
     VatLike public immutable vat;
@@ -177,13 +180,32 @@ contract GuniLev is IERC3156FlashBorrower {
         resolver = _resolver;
         curveIndexDai = _curveIndexDai;
         curveIndexOtherToken = _curveIndexOtherToken;
-        otherTokenTo18Conversion = 10 ** _otherToken.decimals();
+        otherTokenTo18Conversion = 10 ** (18 - _otherToken.decimals());
         
         VatLike(_join.vat()).hope(address(_daiJoin));
     }
 
-    // --- math ---
-    uint256 constant RAY = 10 ** 27;
+    function getExchangeRateBPS(uint256 principal) external view returns (uint256) {
+        (,uint256 mat) = spotter.ilks(ilk);
+        uint256 leveragedAmount = principal*RAY/(mat - RAY);
+
+        (uint256 sqrtPriceX96,,,,,,) = UniPoolLike(guni.pool()).slot0();
+        (, uint256 swapAmount) = resolver.getRebalanceParams(
+            address(guni),
+            guni.token0() == address(dai) ? leveragedAmount : 0,
+            guni.token1() == address(dai) ? leveragedAmount : 0,
+            ((((sqrtPriceX96*sqrtPriceX96) >> 96) * 1e18) >> 96) * otherTokenTo18Conversion
+        );
+
+        uint256 dy = curve.get_dy(curveIndexDai, curveIndexOtherToken, swapAmount);
+
+        return dy * otherTokenTo18Conversion * 10000 / swapAmount;
+    }
+
+    function getLeverageBPS() external view returns (uint256) {
+        (,uint256 mat) = spotter.ilks(ilk);
+        return 10000 * RAY/(mat - RAY);
+    }
 
     function wind(
         uint256 principal,
@@ -235,13 +257,13 @@ contract GuniLev is IERC3156FlashBorrower {
                 address(guni),
                 IERC20(guni.token0()).balanceOf(address(this)),
                 IERC20(guni.token1()).balanceOf(address(this)),
-                ((((sqrtPriceX96*sqrtPriceX96) >> 96) * 1e18) >> 96) * 1e18 / otherTokenTo18Conversion
+                ((((sqrtPriceX96*sqrtPriceX96) >> 96) * 1e18) >> 96) * otherTokenTo18Conversion
             );
         }
 
         // Swap DAI for otherToken on Curve
         dai.approve(address(curve), swapAmount);
-        curve.exchange(curveIndexDai, curveIndexOtherToken, swapAmount, swapAmount * otherTokenTo18Conversion / 1e18 * minExchangeBPS / 10000);
+        curve.exchange(curveIndexDai, curveIndexOtherToken, swapAmount, swapAmount / otherTokenTo18Conversion * minExchangeBPS / 10000);
 
         // Mint G-UNI
         uint256 guniBalance;

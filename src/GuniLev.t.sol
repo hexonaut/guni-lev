@@ -149,9 +149,15 @@ contract GuniLevTest is DSTest {
         assertTrue(false);
     }
 
+    function test_exchangeRateBPS() public {
+        uint256 exchangeRate = lev.getExchangeRateBPS(dai.balanceOf(address(this)));
+
+        assertEq(exchangeRate, 10000);
+    }
+
     function test_open_position() public {
         uint256 principal = dai.balanceOf(address(this));
-        uint256 leveragedAmount = principal * 20;
+        uint256 leveragedAmount = principal * lev.getLeverageBPS()/10000;
 
         lev.wind(dai.balanceOf(address(this)), 10000);      // Swap 1:1
 
@@ -171,7 +177,7 @@ contract GuniLevTest is DSTest {
          (,uint256 rate,,,) = vat.ilks(ilk);
         (uint256 ink, uint256 art) = vat.urns(ilk, address(this));
         assertEqApprox(ink * pip.read() / 1e18, leveragedAmount, 100);
-        assertEqApprox(art * rate / 1e27, leveragedAmount * 19 / 20, 100);
+        assertEqApprox(art * rate / 1e27, leveragedAmount * (lev.getLeverageBPS() - 10000) / lev.getLeverageBPS(), 100);
     }
 
 }
