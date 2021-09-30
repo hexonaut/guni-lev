@@ -149,17 +149,35 @@ contract GuniLevTest is DSTest {
         assertTrue(false);
     }
 
-    function test_exchangeRateBPS() public {
-        uint256 exchangeRate = lev.getExchangeRateBPS(dai.balanceOf(address(this)));
+    function test_windExchangeRateBPS() public {
+        uint256 exchangeRate = lev.getWindExchangeRateBPS(dai.balanceOf(address(this)));
 
-        assertEq(exchangeRate, 10000);
+        assertEqApprox(exchangeRate, 10000, 10);
+    }
+
+    function test_unwindExchangeRateBPS() public {
+        // Need to wind up a vault first
+        lev.wind(dai.balanceOf(address(this)), 0);
+
+        uint256 exchangeRate = lev.getUnwindExchangeRateBPS(address(this));
+
+        assertEqApprox(exchangeRate, 10000, 10);
+    }
+
+    function test_estimatedCost() public {
+        uint256 bal = dai.balanceOf(address(this));
+        int256 cost = lev.getEstimatedCostToWindUnwind(bal);
+        assertGt(cost, 0);
+        uint256 relCostBPS = uint256(cost) * 10000 / bal;
+
+        assertTrue(relCostBPS < 10);
     }
 
     function test_open_position() public {
         uint256 principal = dai.balanceOf(address(this));
         uint256 leveragedAmount = principal * lev.getLeverageBPS()/10000;
 
-        lev.wind(dai.balanceOf(address(this)), 10000);      // Swap 1:1
+        lev.wind(dai.balanceOf(address(this)), 0);
 
         // Should never be leftovers
         assertEq(dai.balanceOf(address(lev)), 0);
@@ -178,6 +196,23 @@ contract GuniLevTest is DSTest {
         (uint256 ink, uint256 art) = vat.urns(ilk, address(this));
         assertEqApprox(ink * pip.read() / 1e18, leveragedAmount, 100);
         assertEqApprox(art * rate / 1e27, leveragedAmount * (lev.getLeverageBPS() - 10000) / lev.getLeverageBPS(), 100);
+    }
+
+    function test_open_close_position() public {
+        lev.wind(dai.balanceOf(address(this)), 0);
+        lev.unwind(0);
+
+        // Should never be leftovers
+        assertEq(dai.balanceOf(address(lev)), 0);
+        assertEq(otherToken.balanceOf(address(lev)), 0);
+        assertEq(guni.balanceOf(address(lev)), 0);
+
+        // Should never be leftover approvals
+        assertEq(dai.allowance(address(lev), address(daiJoin)), 0);
+        assertEq(otherToken.allowance(address(lev), address(curve)), 0);
+        assertEq(guni.allowance(address(lev), address(router)), 0);
+
+        // Position should be roughly closed out
     }
 
 }

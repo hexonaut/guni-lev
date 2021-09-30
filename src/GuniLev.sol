@@ -61,6 +61,19 @@ interface GUNIRouterLike {
         uint256 amount1,
         uint256 mintAmount
     );
+    function removeLiquidity(
+        address _pool,
+        uint256 _burnAmount,
+        uint256 _amount0Min,
+        uint256 _amount1Min,
+        address _receiver
+    )
+    external
+    returns (
+        uint256 amount0,
+        uint256 amount1,
+        uint256 liquidityBurned
+    );
 }
 
 interface GUNIResolverLike {
@@ -185,7 +198,7 @@ contract GuniLev is IERC3156FlashBorrower {
         VatLike(_join.vat()).hope(address(_daiJoin));
     }
 
-    function getExchangeRateBPS(uint256 principal) external view returns (uint256) {
+    function getWindExchangeRateBPS(uint256 principal) public view returns (uint256) {
         (,uint256 mat) = spotter.ilks(ilk);
         uint256 leveragedAmount = principal*RAY/(mat - RAY);
 
@@ -202,9 +215,23 @@ contract GuniLev is IERC3156FlashBorrower {
         return dy * otherTokenTo18Conversion * 10000 / swapAmount;
     }
 
+    function getUnwindExchangeRateBPS(address usr) external view returns (uint256) {
+        (uint256 ink, ) = vat.urns(ilk, usr);
+        uint256 dy = curve.get_dy(curveIndexOtherToken, curveIndexDai, ink / otherTokenTo18Conversion);
+
+        return dy * 10000 / ink;
+    }
+
     function getLeverageBPS() external view returns (uint256) {
         (,uint256 mat) = spotter.ilks(ilk);
         return 10000 * RAY/(mat - RAY);
+    }
+
+    function getEstimatedCostToWindUnwind(uint256 principal) external view returns (int256) {
+        (,uint256 mat) = spotter.ilks(ilk);
+        uint256 leveragedAmount = principal*RAY/(mat - RAY);
+        uint256 dy = curve.get_dy(curveIndexOtherToken, curveIndexDai, leveragedAmount / otherTokenTo18Conversion);
+        return int256(principal) - int256(principal*getWindExchangeRateBPS(principal)/10000*dy/leveragedAmount);
     }
 
     function wind(
@@ -214,6 +241,15 @@ contract GuniLev is IERC3156FlashBorrower {
         bytes memory data = abi.encode(Action.WIND, msg.sender, minExchangeBPS);
         (,uint256 mat) = spotter.ilks(ilk);
         initFlashLoan(data, principal*RAY/(mat - RAY));
+    }
+
+    function unwind(
+        uint256 minExchangeBPS
+    ) external {
+        bytes memory data = abi.encode(Action.UNWIND, msg.sender, minExchangeBPS);
+        (,uint256 rate,,,) = vat.ilks(ilk);
+        (, uint256 art) = vat.urns(ilk, msg.sender);
+        initFlashLoan(data, art*rate/RAY);
     }
 
     function initFlashLoan(bytes memory data, uint256 amount) internal {
@@ -243,7 +279,7 @@ contract GuniLev is IERC3156FlashBorrower {
         if (action == Action.WIND) {
             _wind(usr, amount + fee, minExchangeBPS);
         } else if (action == Action.UNWIND) {
-            
+            _unwind(usr, amount, fee, minExchangeBPS);
         }
         return keccak256("ERC3156FlashBorrower.onFlashLoan");
     }
@@ -289,6 +325,37 @@ contract GuniLev is IERC3156FlashBorrower {
         }
 
         uint256 daiBalance = dai.balanceOf(address(this));
+        if (daiBalance > totalOwed) {
+            // Send extra dai to user
+            dai.transfer(usr, daiBalance - totalOwed);
+        } else if (daiBalance < totalOwed) {
+            // Pull remaining dai needed from usr
+            dai.transferFrom(usr, address(this), totalOwed - daiBalance);
+        }
+
+        // Send any remaining dust from other token to user as well
+        otherToken.transfer(usr, otherToken.balanceOf(address(this)));
+    }
+
+    function _unwind(address usr, uint256 amount, uint256 fee, uint256 minExchangeBPS) internal {
+        // Pay back all CDP debt and exit g-uni
+        (uint256 ink, uint256 art) = vat.urns(ilk, usr);
+        dai.approve(address(daiJoin), amount);
+        daiJoin.join(address(this), amount);
+        vat.frob(ilk, address(usr), address(this), address(this), -int256(ink), -int256(art));
+        join.exit(address(this), ink);
+
+        // Burn G-UNI
+        guni.approve(address(router), ink);
+        router.removeLiquidity(address(guni), ink, 0, 0, address(this));
+
+        // Trade all otherToken for dai
+        uint256 swapAmount = otherToken.balanceOf(address(this));
+        otherToken.approve(address(curve), swapAmount);
+        curve.exchange(curveIndexOtherToken, curveIndexDai, swapAmount, swapAmount * otherTokenTo18Conversion * minExchangeBPS / 10000);
+
+        uint256 daiBalance = dai.balanceOf(address(this));
+        uint256 totalOwed = amount + fee;
         if (daiBalance > totalOwed) {
             // Send extra dai to user
             dai.transfer(usr, daiBalance - totalOwed);
