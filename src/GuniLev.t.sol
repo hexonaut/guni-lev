@@ -218,7 +218,7 @@ contract GuniLevTest is DSTest {
         (uint256 ink, uint256 art) = vat.urns(ilk, address(this));
         assertEq(ink, 0);
         assertEq(art, 0);
-        assertEqApprox(dai.balanceOf(address(this)), principal, 500);      // Amount you get back should be approximately the same as the initial investment
+        assertEqApprox(dai.balanceOf(address(this)), principal, 500);      // Amount you get back should be approximately the same as the initial investment (minus some slippage/fees)
     }
 
 }

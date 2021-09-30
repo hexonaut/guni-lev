@@ -308,7 +308,7 @@ contract GuniLev is IERC3156FlashBorrower {
             uint256 bal1 = IERC20(guni.token1()).balanceOf(address(this));
             dai.approve(address(router), bal0);
             otherToken.approve(address(router), bal1);
-            (,, guniBalance) = router.addLiquidity(address(guni), bal0, bal1, bal0 * 99 / 100, bal1 * 99 / 100, address(this));      // Slippage on this is not terribly important - use 1%
+            (,, guniBalance) = router.addLiquidity(address(guni), bal0, bal1, 0, 0, address(this));
             dai.approve(address(router), 0);
             otherToken.approve(address(router), 0);
         }
