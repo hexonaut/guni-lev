@@ -199,6 +199,8 @@ contract GuniLevTest is DSTest {
     }
 
     function test_open_close_position() public {
+        uint256 principal = dai.balanceOf(address(this));
+
         lev.wind(dai.balanceOf(address(this)), 0);
         lev.unwind(0);
 
@@ -212,7 +214,11 @@ contract GuniLevTest is DSTest {
         assertEq(otherToken.allowance(address(lev), address(curve)), 0);
         assertEq(guni.allowance(address(lev), address(router)), 0);
 
-        // Position should be roughly closed out
+        // Position should be completely closed out
+        (uint256 ink, uint256 art) = vat.urns(ilk, address(this));
+        assertEq(ink, 0);
+        assertEq(art, 0);
+        assertEqApprox(dai.balanceOf(address(this)), principal, 500);      // Amount you get back should be approximately the same as the initial investment
     }
 
 }
