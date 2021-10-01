@@ -149,28 +149,31 @@ contract GuniLevTest is DSTest {
         assertTrue(false);
     }
 
-    function test_windExchangeRateBPS() public {
-        uint256 exchangeRate = lev.getWindExchangeRateBPS(dai.balanceOf(address(this)));
+    function test_getWindEstimates() public {
+        (uint256 expectedRemainingDai,,) = lev.getWindEstimates(address(this), dai.balanceOf(address(this)));
 
-        assertEqApprox(exchangeRate, 10000, 10);
+        assertEqApprox(expectedRemainingDai, 2122 * 1e18, 500);
     }
 
-    function test_unwindExchangeRateBPS() public {
+    function test_getUnwindEstimates() public {
+        uint256 startingAmount = dai.balanceOf(address(this));
+
         // Need to wind up a vault first
-        lev.wind(dai.balanceOf(address(this)), 0);
+        lev.wind(startingAmount, 0);
 
-        uint256 exchangeRate = lev.getUnwindExchangeRateBPS(address(this));
+        uint256 daiAfterUnwind = lev.getUnwindEstimates(address(this));
 
-        assertEqApprox(exchangeRate, 10000, 10);
+        // Should be roughly the same as what you started with around 8% expected losses from slippage
+        assertEqApprox(daiAfterUnwind, startingAmount, 800);
     }
 
     function test_estimatedCost() public {
         uint256 bal = dai.balanceOf(address(this));
-        int256 cost = lev.getEstimatedCostToWindUnwind(bal);
-        assertGt(cost, 0);
+        uint256 cost = lev.getEstimatedCostToWindUnwind(address(this), bal);
         uint256 relCostBPS = uint256(cost) * 10000 / bal;
 
-        assertTrue(relCostBPS < 10);
+        // Expect up to 8% in losses due to slippage
+        assertTrue(relCostBPS < 800);
     }
 
     function test_open_position() public {
