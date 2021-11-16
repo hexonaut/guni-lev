@@ -41,10 +41,10 @@ interface GUNITokenLike is IERC20 {
     function getUnderlyingBalances() external view returns (uint256, uint256);
 }
 
-interface CurveSwapLike {
-    function exchange(int128 i, int128 j, uint256 dx, uint256 min_dy) external;
-    function get_dy(int128 i, int128 j, uint256 dx) external view returns (uint256);
-    function coins(uint256) external view returns (address);
+interface PSMLike {
+    function gemJoin() external view returns (address);
+    function sellGem(address usr, uint256 gemAmt) external;
+    function buyGem(address usr, uint256 gemAmt) external;
 }
 
 interface GUNIRouterLike {
@@ -140,6 +140,7 @@ interface VatLike {
     function hope(address usr) external;
     function frob (bytes32 i, address u, address v, address w, int dink, int dart) external;
     function dai(address) external view returns (uint256);
+    function file(bytes32, bytes32, uint256) external;
 }
 
 interface SpotLike {
@@ -161,11 +162,10 @@ contract GuniLev is IERC3156FlashBorrower {
     IERC20 public immutable dai;
     IERC20 public immutable otherToken;
     IERC3156FlashLender public immutable lender;
-    CurveSwapLike public immutable curve;
+    PSMLike public immutable psm;
+    address public immutable psmGemJoin;
     GUNIRouterLike public immutable router;
     GUNIResolverLike public immutable resolver;
-    int128 public immutable curveIndexDai;
-    int128 public immutable curveIndexOtherToken;
     uint256 public immutable otherTokenTo18Conversion;
 
     constructor(
@@ -174,11 +174,9 @@ contract GuniLev is IERC3156FlashBorrower {
         SpotLike _spotter,
         IERC20 _otherToken,
         IERC3156FlashLender _lender,
-        CurveSwapLike _curve,
+        PSMLike _psm,
         GUNIRouterLike _router,
-        GUNIResolverLike _resolver, 
-        int128 _curveIndexDai,
-        int128 _curveIndexOtherToken
+        GUNIResolverLike _resolver
     ) {
         vat = VatLike(_join.vat());
         ilk = _join.ilk();
@@ -189,11 +187,10 @@ contract GuniLev is IERC3156FlashBorrower {
         dai = IERC20(_daiJoin.dai());
         otherToken = _otherToken;
         lender = _lender;
-        curve = _curve;
+        psm = _psm;
+        psmGemJoin = PSMLike(_psm).gemJoin();
         router = _router;
         resolver = _resolver;
-        curveIndexDai = _curveIndexDai;
-        curveIndexOtherToken = _curveIndexOtherToken;
         otherTokenTo18Conversion = 10 ** (18 - _otherToken.decimals());
         
         VatLike(_join.vat()).hope(address(_daiJoin));
@@ -219,7 +216,7 @@ contract GuniLev is IERC3156FlashBorrower {
 
         uint256 daiBalance;
         {
-            (,, estimatedGuniAmount) = guni.getMintAmounts(guni.token0() == address(dai) ? leveragedAmount - swapAmount : curve.get_dy(curveIndexDai, curveIndexOtherToken, swapAmount), guni.token1() == address(otherToken) ? curve.get_dy(curveIndexDai, curveIndexOtherToken, swapAmount) : leveragedAmount - swapAmount);
+            (,, estimatedGuniAmount) = guni.getMintAmounts(guni.token0() == address(dai) ? leveragedAmount - swapAmount : swapAmount / otherTokenTo18Conversion, guni.token1() == address(otherToken) ? swapAmount / otherTokenTo18Conversion : leveragedAmount - swapAmount);
             (,uint256 rate, uint256 spot,,) = vat.ilks(ilk);
             (uint256 ink, uint256 art) = vat.urns(ilk, usr);
             estimatedDebt = ((estimatedGuniAmount + ink) * spot / rate - art) * rate / RAY;
@@ -237,7 +234,7 @@ contract GuniLev is IERC3156FlashBorrower {
         uint256 totalSupply = guni.totalSupply();
         bal0 = bal0 * ink / totalSupply;
         bal1 = bal1 * ink / totalSupply;
-        uint256 dy = curve.get_dy(curveIndexOtherToken, curveIndexDai, guni.token0() == address(dai) ? bal1 : bal0);
+        uint256 dy = (guni.token0() == address(dai) ? bal1 : bal0) * otherTokenTo18Conversion;
 
         return (guni.token0() == address(dai) ? bal0 : bal1) + dy - art * rate / RAY;
     }
@@ -321,9 +318,9 @@ contract GuniLev is IERC3156FlashBorrower {
             );
         }
 
-        // Swap DAI for otherToken on Curve
-        dai.approve(address(curve), swapAmount);
-        curve.exchange(curveIndexDai, curveIndexOtherToken, swapAmount, 0);
+        // Swap DAI for otherToken in PSM
+        dai.approve(address(psm), swapAmount / otherTokenTo18Conversion * otherTokenTo18Conversion);    // Truncate rounding errors
+        psm.buyGem(address(this), swapAmount / otherTokenTo18Conversion);
 
         // Mint G-UNI
         uint256 guniBalance;
@@ -377,8 +374,8 @@ contract GuniLev is IERC3156FlashBorrower {
 
         // Trade all otherToken for dai
         uint256 swapAmount = otherToken.balanceOf(address(this));
-        otherToken.approve(address(curve), swapAmount);
-        curve.exchange(curveIndexOtherToken, curveIndexDai, swapAmount, 0);
+        otherToken.approve(address(psmGemJoin), swapAmount);
+        psm.sellGem(address(this), swapAmount);
 
         uint256 daiBalance = dai.balanceOf(address(this));
         uint256 totalOwed = amount + fee;

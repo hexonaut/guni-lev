@@ -33,7 +33,7 @@ contract GuniLevTest is DSTest {
     IERC20 public dai;
     IERC20 public otherToken;
     IERC3156FlashLender public lender;
-    CurveSwapLike public curve;
+    PSMLike public psm;
     GUNIRouterLike public router;
     GUNIResolverLike public resolver;
     GuniLev public lev;
@@ -51,11 +51,11 @@ contract GuniLevTest is DSTest {
         dai = IERC20(daiJoin.dai());
         otherToken = IERC20(0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48);    // USDC
         lender = IERC3156FlashLender(0x1EB4CF3A948E7D72A198fe073cCb8C7a948cD853);
-        curve = CurveSwapLike(0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7);      // 3-pool
+        psm = PSMLike(0x89B78CfA322F6C5dE0aBcEecab66Aee45393cC5A);
         router = GUNIRouterLike(0x14E6D67F824C3a7b4329d3228807f8654294e4bd);
         resolver = GUNIResolverLike(0x0317650Af6f184344D7368AC8bB0bEbA5EDB214a);
 
-        lev = new GuniLev(join, daiJoin, spotter, otherToken, lender, curve, router, resolver, 0, 1);
+        lev = new GuniLev(join, daiJoin, spotter, otherToken, lender, psm, router, resolver);
 
         // Give read access to Oracle
         giveAuthAccess(address(pip), address(this));
@@ -65,6 +65,10 @@ contract GuniLevTest is DSTest {
         giveTokens(address(dai), 50_000 * 1e18);
         vat.hope(address(lev));
         dai.approve(address(lev), type(uint256).max);
+
+        // Raise the debt ceiling to a super high number
+        giveAuthAccess(address(vat), address(this));
+        vat.file(ilk, "line", 5e9 * 1e45);
     }
 
     function assertEqApprox(uint256 _a, uint256 _b, uint256 _tolerance) internal {
@@ -152,7 +156,7 @@ contract GuniLevTest is DSTest {
     function test_getWindEstimates() public {
         (uint256 expectedRemainingDai,,) = lev.getWindEstimates(address(this), dai.balanceOf(address(this)));
 
-        assertEqApprox(expectedRemainingDai, 2122 * 1e18, 500);
+        assertEqApprox(expectedRemainingDai, 789 * 1e18, 500);
     }
 
     function test_getUnwindEstimates() public {
@@ -163,8 +167,8 @@ contract GuniLevTest is DSTest {
 
         uint256 daiAfterUnwind = lev.getUnwindEstimates(address(this));
 
-        // Should be roughly the same as what you started with around 8% expected losses from slippage
-        assertEqApprox(daiAfterUnwind, startingAmount, 800);
+        // Should be roughly the same as what you started with (allow for 2% loss from G-UNI conversion)
+        assertEqApprox(daiAfterUnwind, startingAmount, 200);
     }
 
     function test_estimatedCost() public {
@@ -172,8 +176,8 @@ contract GuniLevTest is DSTest {
         uint256 cost = lev.getEstimatedCostToWindUnwind(address(this), bal);
         uint256 relCostBPS = uint256(cost) * 10000 / bal;
 
-        // Expect up to 8% in losses due to slippage
-        assertTrue(relCostBPS < 800);
+        // Due to PSM there should be almost no loss (allow for 2% loss from G-UNI conversion)
+        assertTrue(relCostBPS < 200);
     }
 
     function test_open_position() public {
@@ -189,12 +193,12 @@ contract GuniLevTest is DSTest {
 
         // Should never be leftover approvals
         assertEq(dai.allowance(address(lev), address(lender)), 0);
-        assertEq(dai.allowance(address(lev), address(curve)), 0);
+        assertEq(dai.allowance(address(lev), address(psm)), 0);
         assertEq(dai.allowance(address(lev), address(router)), 0);
         assertEq(otherToken.allowance(address(lev), address(router)), 0);
         assertEq(guni.allowance(address(lev), address(join)), 0);
 
-        // Should have a position open worth roughly 20x the original investment
+        // Should have a position open worth roughly 50x the original investment
          (,uint256 rate,,,) = vat.ilks(ilk);
         (uint256 ink, uint256 art) = vat.urns(ilk, address(this));
         assertEqApprox(ink * pip.read() / 1e18, leveragedAmount, 100);
@@ -214,14 +218,14 @@ contract GuniLevTest is DSTest {
 
         // Should never be leftover approvals
         assertEq(dai.allowance(address(lev), address(daiJoin)), 0);
-        assertEq(otherToken.allowance(address(lev), address(curve)), 0);
+        assertEq(otherToken.allowance(address(lev), psm.gemJoin()), 0);
         assertEq(guni.allowance(address(lev), address(router)), 0);
 
         // Position should be completely closed out
         (uint256 ink, uint256 art) = vat.urns(ilk, address(this));
         assertEq(ink, 0);
         assertEq(art, 0);
-        assertEqApprox(dai.balanceOf(address(this)), principal, 500);      // Amount you get back should be approximately the same as the initial investment (minus some slippage/fees)
+        assertEqApprox(dai.balanceOf(address(this)), principal, 200);      // Amount you get back should be approximately the same as the initial investment (minus some slippage/fees)
     }
 
 }
