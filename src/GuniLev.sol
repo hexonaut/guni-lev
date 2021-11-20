@@ -270,7 +270,7 @@ contract GuniLev is IERC3156FlashBorrower {
         bytes memory data = abi.encode(Action.UNWIND, msg.sender, minWalletDai);
         (,uint256 rate,,,) = vat.ilks(ilk);
         (, uint256 art) = vat.urns(ilk, msg.sender);
-        initFlashLoan(data,  (art * rate + RAY - 1) / RAY);
+        initFlashLoan(data, (art * rate + RAY - 1) / RAY);
     }
 
     function initFlashLoan(bytes memory data, uint256 amount) internal {
