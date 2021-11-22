@@ -153,6 +153,39 @@ contract GuniLevTest is DSTest {
         assertTrue(false);
     }
 
+    function removeDustBalance (address target) internal {
+        // Edge case - balance is already zero for some reason
+        if (vat.dai(target) == 0) return;
+
+        for (int i = 0; i < 100; i++) {
+            // Scan the storage for the balance storage slot
+            bytes32 prevValue = hevm.load(
+                address(vat),
+                keccak256(abi.encode(target, uint256(i)))
+            );
+
+            if (prevValue == bytes32(vat.dai(target))) {
+                // Found it, set it to 0
+                hevm.store(
+                    address(vat),
+                    keccak256(abi.encode(target, uint256(i))),
+                    bytes32(uint256(0))
+                );
+                return;
+            } else {
+                // Keep going after restoring the original value
+                hevm.store(
+                    address(vat),
+                    keccak256(abi.encode(target, uint256(i))),
+                    prevValue
+                );
+            }
+        }
+
+        // We have failed if we reach here
+        assertTrue(false);
+    }
+
     function test_getWindEstimates() public {
         (uint256 expectedRemainingDai,,) = lev.getWindEstimates(address(this), dai.balanceOf(address(this)));
 
@@ -203,6 +236,28 @@ contract GuniLevTest is DSTest {
         (uint256 ink, uint256 art) = vat.urns(ilk, address(this));
         assertEqApprox(ink * pip.read() / 1e18, leveragedAmount, 100);
         assertEqApprox(art * rate / 1e27, leveragedAmount * (lev.getLeverageBPS() - 10000) / lev.getLeverageBPS(), 100);
+    }
+
+    function test_open_close_rounding_issue() public {
+        uint256 userBalance = dai.balanceOf(address(this));
+
+        lev.wind(userBalance, 0);
+
+        (uint256 art, ) = vat.urns(ilk, address(this));
+
+        // override dai dust balance in vault engine and set it to zero, this
+        // will force unwind() to fail if we're rounding the debt amount down
+        removeDustBalance(address(lev));
+
+        uint256 daiBalance = vat.dai(address(lev));
+
+        assertEq(daiBalance, 0);
+
+        (,uint256 rate,,,) = vat.ilks(ilk);
+        // make sure we would not repay enough if debt was rounded down
+        assertGt(art * rate, (art * rate / 1e27) * 1e27 + daiBalance);
+
+        lev.unwind(0);
     }
 
     function test_open_close_position() public {
